@@ -1,0 +1,371 @@
+#lang racket
+(require eopl)
+(require expect/rackunit)
+
+;<exp> ::= <number>
+;        | <boolean>
+;        | <symbol>
+;        | (ifte <exp> <exp> <exp>)
+;        | (assume ([<symbol> <exp>]*) <exp>)
+;        | (function (<symbol>*) <exp>)
+;        | (recursive ([<symbol> (<symbol>*) <exp>]*) <exp>)
+;        | (<exp> <exp>*)
+
+;;; DATATYPE DEFINITION
+(define-datatype ast ast?
+  [num (datum number?)]
+  [bool (datum boolean?)]
+  [ifte (test ast?) (then ast?) (else-ast ast?)]
+  [function
+   (formals (list-of id?))
+   (body ast?)]
+  [recursive (fbinds (list-of fbind?)) (body ast?)]
+  [app (rator ast?) (rands (list-of ast?))]
+  [id-ref (sym id?)]
+  [assume (binds  (list-of bind?)) (body ast?)])
+
+(define-datatype bind bind?
+  [make-bind (b-id id?) (b-ast ast?)])
+
+;;; bind-id : bind? -> id?
+(define bind-id
+  (lambda (b)
+    (cases bind b
+      [make-bind (b-id b-ast) b-id])))
+
+;;; bind-ast : bind? -> ast?
+(define bind-ast
+  (lambda (b)
+    (cases bind b
+      [make-bind (b-id b-ast) b-ast])))
+
+;;; fbind definition
+(define-datatype fbind fbind?
+  [make-fbind (fb-id id?)
+              (fb-formals (list-of id?))
+              (fb-body ast?)])
+
+;;; fbind-id : fbind? -> id?
+(define fbind-id
+  (lambda (b)
+    (cases fbind b
+      [make-fbind (fb-id fb-formals fb-body) fb-id])))
+
+;;; fbind-formals : fbind? -> (list-of id?)
+(define fbind-formals
+  (lambda (b)
+    (cases fbind b
+      [make-fbind (fb-id fb-formals fb-body) fb-formals])))
+
+;;; fbind-body : fbind? -> ast?
+(define fbind-body
+  (lambda (b)
+    (cases fbind b
+      [make-fbind (fb-id fb-formals fb-body) fb-body])))
+
+(define *keywords*
+  '(ifte assume function recursive))
+
+(define id?
+  (lambda (x)
+    (and
+     (symbol? x)
+     (not (memq x *keywords*)))))
+
+(define (createBindings lst)
+                              (for/list [ (item lst) ] (
+                                                        make-bind
+                                                        (car item)
+                                                        (parse (cadr item))
+                                                        )
+                                )
+  )
+
+(define (createFBinds lst) (
+                            for/list [ (def lst) ] (
+                                                    make-fbind
+                                                    (car def)
+                                                    (cadr def)
+                                                    (parse (caddr def))
+                                                    )
+                             )
+  )
+
+(define (parse exp) (
+                     cond
+                      ; empty statement
+                      [ (null? exp) '() ]
+                      ; number
+                      [ (number? exp) (num exp)]
+                      ; boolean
+                      [ (boolean? exp) (bool exp) ]
+                      ; symbol :: value to be read from environment
+                      [ (symbol? exp) (id-ref exp)]
+                      ; If Then Else
+                      [ (and
+                         (eqv? 'ifte (car exp))
+                         (= 4 (length exp))) (
+                                              let [
+                                                   (condition (parse (cadr exp)))
+                                                   (thenExpression (parse (caddr exp)))
+                                                   (elseExpression (parse (cadddr exp)))
+                                                   ] (
+                                                      ifte condition thenExpression elseExpression
+                                                                  )
+                                               )
+                                             ]
+                      ; assume :: Variable Declaration
+                      [ (and
+                         (eqv? 'assume (car exp))
+                         (= 3 (length exp))
+                         ) (
+                            assume (createBindings (cadr exp)) (parse (caddr exp))
+                                   )
+                           ]
+                      ; Functions
+                      [ (and
+                         (eqv? 'function (car exp))
+                         (= 3 (length exp))) (
+                                                    let [
+                                                         (formals (cadr exp))
+                                                         (body (parse (caddr exp)))
+                                                         ] (
+                                                            function formals body
+                                                                     )
+                                                     )
+                                                   ]
+                      ; Recursion
+                      [ (and
+                         (eqv? 'recursive (car exp))
+                         (= 3 (length exp))) (
+                                              let [
+                                                   (fbinds (createFBinds (cadr exp)))
+                                                   (body (parse (caddr exp)))
+                                                   ] (
+                                                      recursive fbinds body
+                                                                )
+                                               )
+                                             ]
+                      [ else (app (parse (car exp)) (map (lambda (x) (parse x)) (cdr exp)))]
+                      )
+  )
+
+;; FUNCTIONS DEFINITION
+(define-datatype proc proc?
+  [prim-proc
+    ;; prim refers to a scheme procedure
+    (prim procedure?)
+    ;; sig is the signature
+    (sig (list-of procedure?))] 
+  [closure
+    (formals (list-of symbol?))
+    (body ast?)
+    (env env?)])
+
+;;; prim? : proc? -> boolean?
+(define prim-proc?
+  (lambda (p)
+    (cases proc p
+      [prim-proc (prim sig) #t]
+      [else #f])))
+
+(define closure? 
+  (lambda (p)
+    (cases proc p
+      [prim-proc (prim sig) #f]
+      [else #t])))
+
+; <expressible-value> ::= <number> | <boolean> | <proc>
+;;; expressible-value? : any/c -> boolean?
+(define expressible-value?
+  (or/c number? boolean? proc?))
+
+;;; <denotable-value> ::= <number> | <boolean> | <proc>
+;;; denotable-value? :any/c -> boolean?
+(define denotable-value?
+  (or/c number? boolean? proc?))
+
+(define-datatype env env?
+  [empty-env]
+  [extended-env
+    (syms (list-of symbol?))
+    (vals (list-of denotable-value?))
+    (outer-env env?)]
+  [extended-rec-env
+    (fsyms (list-of symbol?))
+    (lformals (list-of (list-of symbol?)))
+    (bodies (list-of ast?))
+    (outer-env env?)])
+
+;;; empty-env? : env? -> boolean?
+(define empty-env?
+  (lambda (e)
+    (cases env e
+      [empty-env () #t]
+      [else #f])))
+
+;;; extended-env? : env? -> boolean?
+(define extended-env?
+  (lambda (e)
+    (cases env e
+      [extended-env (syms vals outer-env) #t]
+      [else #f])))
+
+;;; extended-rec-env? : env? -> boolean?
+(define extended-rec-env?
+  (lambda (e)
+    (cases env e
+      [extended-rec-env (fsyms lformals bodies outer-env) #t]
+      [else #f])))
+
+;;; lookup-env: [env?  symbol?] -> any/c
+;;; lookup-env: throws "unbound identifier" error
+
+;;; list-index : [(listof any/c)  any/c] -> 
+(define list-index
+  (lambda (ls a)
+    (letrec ([loop
+               (lambda (ls ans)
+                 (cond
+                   [(null? ls) -1]
+                   [(eq? (first ls) a) ans]
+                   [#t (loop (rest ls) (+ 1 ans))]))])
+      (loop ls 0))))
+
+(define lookup-env
+  (lambda (e x)
+    ( cases env e
+       [ empty-env () (error 'empty-env "unbound identifier ~a" x) ]
+       [ extended-env (syms vals outer-env) (
+                                           let ([j (list-index syms x)])
+                                            (cond
+                                              [(= j -1) (lookup-env outer-env x)]
+                                              [#t (list-ref vals j)])
+                                            )
+                      ]
+       [ extended-rec-env (syms formals bodies outer-env) (
+                                                              let ([j (list-index syms x)])
+                                                               (cond
+                                                                 [ (= j -1) (lookup-env outer-env x)]
+                                                                 [else (closure
+                                                                      (list-ref formals j)
+                                                                      (list-ref bodies j)
+                                                                      e
+                                                                      )])
+                                                               )
+                          ]
+       )
+    ))
+
+
+;;; EVALUAITON ERROR STATEMENTS
+(struct exn:exec-div-by-zero exn:fail ())
+(define raise-exec-div-by-zero
+  (lambda ()
+    (raise (exn:exec-div-by-zero "div-by-0!" (current-continuation-marks)))))
+
+(struct exn:exec-type-mismatch exn:fail ())
+(define raise-exec-type-mismatch
+  (lambda ()
+    (raise (exn:exec-type-mismatch "type mismatch!" (current-continuation-marks)))))
+
+(struct exn:lookup-error exn:fail ())
+(define raise-lookup-error 
+  (lambda ()
+    (raise (exn:lookup-error "unbound identifier" (current-continuation-marks)))))
+
+;;; runtime-check :: [expressible? -> boolean?], exn? -> [expressible? -> expressible? || exn?] 
+(define runtime-check
+  (lambda (pred? exn)
+    (lambda (v)
+      (if (pred? v)
+          v
+          (exn)))))
+
+(define typecheck-num
+  (runtime-check number?  raise-exec-type-mismatch))
+
+(define typecheck-bool 
+  (runtime-check boolean? raise-exec-type-mismatch))
+
+(define check-non-zero
+  (runtime-check (not/c zero?) raise-exec-div-by-zero))
+
+(define +p (prim-proc (lambda (l) (+ (car l) (cadr l))) (list number? number? number?)))
+(define -p (prim-proc (lambda (l) (- (car l) (cadr l))) (list number? number? number?)))
+(define *p (prim-proc (lambda (l) (* (car l) (cadr l))) (list number? number? number?)))
+(define /p (prim-proc (lambda (l) (/ (car l) (check-non-zero (cadr l)))) (list number? number? number?)))
+(define <p (prim-proc (lambda (l) (< (car l) (cadr l))) (list boolean? number? number?)))
+(define <=p (prim-proc (lambda (l) (<= (car l) (cadr l))) (list boolean? number? number?)))
+(define eq?p (prim-proc (lambda (l) (eq? (car l) (cadr l))) (list boolean? number? number?)))
+(define 0?p (prim-proc (lambda (l) (zero? (car l))) (list boolean? number?)))
+(define !p (prim-proc (lambda (l) (not (car l))) (list boolean? boolean?)))
+
+
+
+(define *init-env*
+  (extended-env
+   '(+ - * / < <= eq? 0? !)
+   (list +p -p *p /p <p <=p eq?p 0?p !p)
+   (empty-env)))
+
+
+(define (getSymbols bindings) ( map bind-id bindings ))
+
+(define (getValues bindings e) (map
+                                (lambda (childAst) (eval-ast childAst e))
+                                (map bind-ast bindings))
+  )
+                               
+(define (extend-environment e bindings)
+  (extended-env (getSymbols bindings) (getValues bindings e) e)
+  )
+
+(define (extend-recursive-environment e fbinds) (
+                                                 let ( [syms
+                                                        (map (lambda (binding) (fbind-id binding)) fbinds)
+                                                        ]
+                                                       [formals
+                                                        (map (lambda (binding) (fbind-formals binding)) fbinds)
+                                                        ]
+                                                       [bodies
+                                                        (map (lambda (binding) (fbind-body binding)) fbinds)
+                                                        ])
+                                                  (extended-rec-env syms formals bodies e))
+                                                  )
+
+(define eval-ast
+  (lambda (a e) (
+                 cases ast a
+                  [num (n) n]
+                  [bool (b) b]
+                  [ifte (condition thenAst elseAst) (if
+                                                     (eqv? #t (typecheck-bool (eval-ast condition e)))
+                                                     (eval-ast thenAst e)
+                                                     (eval-ast elseAst e)
+                                                     )
+                        ]
+                  [function (formals body) (closure formals body e)]
+                  [recursive (fbinds ast) (eval-ast ast (extend-recursive-environment e fbinds))]
+                  [app (rator rands)
+                       (let ([ x (eval-ast rator e)])
+                         (cases proc x
+                           (prim-proc (prim signature)
+                                      (prim (for/list ([arg rands]) (eval-ast arg e))
+                                            )
+                                      )
+                           (closure (formals ast closureEnv)
+                                    (eval-ast ast
+                                              (extended-env formals
+                                                            (for/list ([arg rands]) (eval-ast arg e))
+                                                            closureEnv
+                                                            )
+                                              )
+                                    )
+                         ))
+                       ]
+                  [id-ref (sym) (lookup-env e sym)]
+                  [assume (bindings ast) (eval-ast ast (extend-environment e bindings))]
+    )
+  )
+)
